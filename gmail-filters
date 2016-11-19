@@ -1,6 +1,7 @@
 #!/usr/bin/env python2
 import json
 import os
+import re
 import sys
 import xml.dom.minidom as minidom
 import xml.etree.ElementTree as ET
@@ -20,10 +21,10 @@ Config file example:
             "filter": "from:bob@bla.com",
          },
          "from_bob_or_bla": {
-            "or": [ "from_bla", "from_bob" ]
+            "extras": "from_bla OR from_bob"
          },
          "from_bob_and_bla": {
-            "and": [ "from_bla", "from_bob" ]
+            "extras": "from_bla AND from_bob"
          }
       },
       "actions": [
@@ -35,16 +36,42 @@ Config file example:
             "categorize": "Updates",
             "star": true,
             "important": "always|never"
+         },
+         {
+            "filters": [
+               "from_bla AND -from_bob",
+               "from_bob_and_bla"
+               ],
+            "archive": true,
+            "label": "ignore"
          }
       ]
    }
 }
 """
+
 CONFIG_FNAME = os.path.join( os.environ[ 'HOME' ], '.gmail_filters.json' )
 
-HEADER = "<?xml version='1.0' encoding='UTF-8'?>"
+categories = {
+      'updates': '^smartlabel_notification',
+      'forums': '^smartlabel_group',
+      'personal': '^smartlabel_personal',
+      'social': '^smartlabel_social',
+      'promotions': '^smartlabel_promo',
+   }
+
+boolstrings = {
+      True: 'true',
+      False: 'false'
+   }
+
+markImportantKeys = {
+      'always': 'shouldAlwaysMarkAsImportant',
+      'never': 'shouldNeverMarkAsImportant'
+   }
 
 def parensWrap( string ):
+   """Wrap string in parenthesis. If it is already wrapped in parens, do nothing."""
    string = string.strip()
    if len( string ) > 1 and string[ 0 ] == '(' and string[ -1 ] == ')':
       parens = 1
@@ -58,7 +85,7 @@ def parensWrap( string ):
             if i == len( string ) - 2:
                # This is the last character and it closes the first parens
                return string
-         break
+            break
 
    return '(%s)' % string
 
@@ -68,6 +95,12 @@ class ConfigHelper( object ):
       f = open( fname )
       self.config = json.loads( f.read() )
       self.account = self.findAccountKey( account )
+      self.verify()
+
+   def verify( self ):
+      for account, accountInfo in self.config.iteritems():
+         for key, filter_ in accountInfo[ 'filters' ].iteritems():
+            assert re.match( '^\w+$', key ) is not None
 
    def findAccountKey( self, account ):
       foundConfigs = []
@@ -86,58 +119,80 @@ class ConfigHelper( object ):
    def accountFilters( self ):
       return self.config[ self.account ]
 
+   def expandFilterRefs( self, refFilterStr ):
+      parts = re.split( r'\b(\w+)\b', refFilterStr )
+      keywords = [ 'AND', 'OR' ]
+      for i in range( len( parts ) ):
+         if re.match( '^\w+$',  parts[ i ] ) and parts[ i ] not in keywords:
+            parts[ i ] = self.filterString( parts[ i ] )
+
+      return ''.join( parts )
+
    def filterString( self, rootFilterName ):
       filterObj = self.accountFilters()[ 'filters' ][ rootFilterName ]
-      filterString = filterObj.get( 'filter' )
+      assert( set( filterObj.keys() ).issubset( set( [ 'filter', 'extras' ] ) ) )
 
-      otherFilters = None
-      otherFiltersJoiner = None
-      if 'or' in filterObj:
-         assert 'and' not in filterObj
-         otherFilters = [ self.filterString( f ) for f in filterObj[ 'or' ] ]
-         otherFiltersJoiner = ' OR '
-      elif 'and' in filterObj:
-         otherFilters = [ self.filterString( f ) for f in filterObj[ 'and' ] ]
-         otherFiltersJoiner = ' AND '
+      filterString = filterObj.get( 'filter', '' )
+      if filterString:
+         filterString = parensWrap( filterString )
 
-      if otherFilters:
-         assert otherFiltersJoiner
-         filterString = otherFiltersJoiner.join(
-               [ parensWrap( fs ) for fs in [ filterString ] + otherFilters ] )
+      extrasString = ''
+      if 'extras' in filterObj:
+         extrasString = ' ' + self.expandFilterRefs( filterObj[ 'extras' ] )
 
-      return filterString
+      return parensWrap( filterString + extrasString )
 
-   def createEntry( self, filterAction ):
-      entry = ET.Element( 'entry' )
-      category = ET.SubElement( entry, 'category' )
-      category.set( 'term', 'filter' )
-
-      def addProperty( name, val ):
+   def createEntries( self, filterAction ):
+      def addProperty( entry, name, val ):
          prop = ET.SubElement( entry, 'apps:property' )
          prop.set( 'name', name )
          prop.set( 'value', val )
 
+      permittedAttrs = set( [ 'filters', 'archive', 'markRead', 'label',
+                              'categorize', 'star', 'important' ] )
+      assert set( filterAction.keys() ).issubset( permittedAttrs ), \
+              "%s is not a subset of %s" % ( filterAction.keys(), permittedAttrs )
+
       filters = filterAction[ 'filters' ]
-      filterString = ' AND '.join(
-            [ parensWrap( self.filterString( fs ) ) for fs in filters ] )
-      addProperty( 'hasTheWord', filterString )
+      assert isinstance( filters, list ), "filters is a %s" % type( filters )
 
-      if 'archive' in filterAction:
-         pass
-      if 'markRead' in filterAction:
-         pass
-      if 'label' in filterAction:
-         pass
-      if 'categorize' in filterAction:
-         pass
-      if 'star' in filterAction:
-         pass
-      if 'important' in filterAction:
-         pass
+      entries = []
+      for fs in filters:
+         entry = ET.Element( 'entry' )
+         category = ET.SubElement( entry, 'category' )
+         category.set( 'term', 'filter' )
 
-      addProperty( 'sizeOperator', 's_sl' )
-      addProperty( 'sizeUnit', 's_smb' )
-      return entry
+         filterString = self.expandFilterRefs( fs )
+         addProperty( entry, 'hasTheWord', filterString )
+
+         if 'archive' in filterAction:
+            addProperty( entry, 'shouldArchive',
+                         boolstrings[ filterAction[ 'archive' ] ] )
+
+         if 'markRead' in filterAction:
+            addProperty( entry, 'shouldMarkAsRead',
+                         boolstrings[ filterAction[ 'markRead' ] ] )
+
+         if 'label' in filterAction:
+            addProperty( entry, 'label', filterAction[ 'label' ] )
+
+         if 'categorize' in filterAction:
+            addProperty( entry, 'smartLabelToApply',
+                         categories[ filterAction[ 'categorize' ] ] )
+
+         if 'star' in filterAction:
+            addProperty( entry, 'shouldStar', boolstrings[ filterAction[ 'star' ] ] )
+
+         if 'important' in filterAction:
+            addProperty( entry, markImportantKeys[ filterAction[ 'important' ] ],
+                         'true' )
+
+         addProperty( entry, 'sizeOperator', 's_sl' )
+         addProperty( entry, 'sizeUnit', 's_smb' )
+
+         entries.append( entry )
+
+      return entries
 
    def toXml( self ):
       root = ET.Element( 'feed' )
@@ -146,16 +201,15 @@ class ConfigHelper( object ):
       author = ET.SubElement( root, 'author' )
       ET.SubElement( author, 'name' ).text = self.accountFilters().get( 'author' )
       for filterAction in self.accountFilters()[ 'actions' ]:
-         root.append( self.createEntry( filterAction ) )
+         root.extend( self.createEntries( filterAction ) )
 
       reparsed = minidom.parseString( ET.tostring( root ) )
-      return HEADER + reparsed.toprettyxml( indent="  " )
+      return reparsed.toprettyxml( indent="  ", encoding='UTF-8' )
 
 def main():
    account = sys.argv[ 1 ]
    try:
       ch = ConfigHelper( CONFIG_FNAME, account )
-      print ch.account
       print ch.toXml()
    except IOError, e:
       print str( e )
