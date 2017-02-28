@@ -207,6 +207,9 @@ class ConfigHelper( object ):
       return reparsed.toprettyxml( indent="  ", encoding='UTF-8' )
 
 def main():
+   if len( sys.argv ) < 2:
+      print "usage: gmail-filters accountname"
+      exit( 1 )
    account = sys.argv[ 1 ]
    try:
       ch = ConfigHelper( CONFIG_FNAME, account )
