@@ -1,222 +1,240 @@
-#!/usr/bin/env python2
-import json
-import os
+#!/usr/bin/env python3
+
+import argparse
+import copy
 import re
 import sys
-import xml.dom.minidom as minidom
-import xml.etree.ElementTree as ET
 
-"""
-Config file example:
+import colors
 
-{
-   "foo@bar.com": {
-      "alias": "foo",
-      "author": "John Doe",
-      "filters": {
-         "from_bla": {
-            "filter": "from:bla@bla.com",
-         },
-         "from_bob": {
-            "filter": "from:bob@bla.com",
-         },
-         "from_bob_or_bla": {
-            "extras": "from_bla OR from_bob"
-         },
-         "from_bob_and_bla": {
-            "extras": "from_bla AND from_bob"
-         }
-      },
-      "actions": [
-         {
-            "filters": [ "from_bla" ],
-            "archive": true,
-            "markRead": true,
-            "label": "FromBla",
-            "categorize": "Updates",
-            "star": true,
-            "important": "always|never"
-         },
-         {
-            "filters": [
-               "from_bla AND -from_bob",
-               "from_bob_and_bla"
-               ],
-            "archive": true,
-            "label": "ignore"
-         }
-      ]
-   }
-}
-"""
+from GmailFilters import parse_filter_element
+import GmailFilters.Api as Api
+from GmailFilters.Template import update_all_meta_groups, \
+                                  TemplateError
 
-CONFIG_FNAME = os.path.join( os.environ[ 'HOME' ], '.gmail_filters.json' )
+assert sys.version_info[ 0 ] == 3, "Script requires python 3"
 
-categories = {
-      'updates': '^smartlabel_notification',
-      'forums': '^smartlabel_group',
-      'personal': '^smartlabel_personal',
-      'social': '^smartlabel_social',
-      'promotions': '^smartlabel_promo',
-   }
+args = None
 
-boolstrings = {
-      True: 'true',
-      False: 'false'
-   }
+CRITERIA = set([
+   'from',
+   'hasAttachment',
+   'subject',
+   'sizeComparison',
+   'to',
+   'query',
+   'excludeChats',
+   'negatedQuery',
+   'size',
+])
 
-markImportantKeys = {
-      'always': 'shouldAlwaysMarkAsImportant',
-      'never': 'shouldNeverMarkAsImportant'
-   }
+def print_v( *prArgs, **prKwargs ):
+   if args.verbose:
+      print( *prArgs, **prKwargs )
 
-def parensWrap( string ):
-   """Wrap string in parenthesis. If it is already wrapped in parens, do nothing."""
-   string = string.strip()
-   if len( string ) > 1 and string[ 0 ] == '(' and string[ -1 ] == ')':
-      parens = 1
-      for i, c in enumerate( string[ 1: ] ):
-         if c == ')':
-            parens -= 1
-         elif c == '(':
-            parens += 1
+def maybe_color( msg, fg=None, style=None ):
+   if not args.no_color:
+      return colors.color( msg, fg=fg, style=style )
 
-         if parens == 0:
-            if i == len( string ) - 2:
-               # This is the last character and it closes the first parens
-               return string
-            break
+   return msg
 
-   return '(%s)' % string
+def check_with_user( msg, requireLongConfirm=False ):
+   if args.assumeyes or args.dry_run:
+      return True
+   if requireLongConfirm:
+      while True:
+         inp = input( "%s (No/yes): " % msg ).strip()
+         if inp and inp[ 0 ].lower() == 'y':
+            if inp.lower() == 'yes':
+               return True
+            print( "Whole word 'yes' is required" )
+         else:
+            return False
+   else:
+      inp = input( "%s (N/y): " % msg ).strip()
+      return inp and inp[ 0 ].lower() == 'y'
 
-class ConfigHelper( object ):
-   def __init__( self, fname, account ):
-      self.filename = fname
-      f = open( fname )
-      self.config = json.loads( f.read() )
-      self.account = self.findAccountKey( account )
-      self.verify()
+def get_auth_http():
+   return Api.get_auth_http( args )
 
-   def verify( self ):
-      for account, accountInfo in self.config.iteritems():
-         for key, filter_ in accountInfo[ 'filters' ].iteritems():
-            assert re.match( '^\w+$', key ) is not None
+def get_service():
+   http = get_auth_http()
+   service = Api.Service( http, dryWrites=args.dry_run )
+   emailAddr = service.get_email_addr()
 
-   def findAccountKey( self, account ):
-      foundConfigs = []
-      for email, conf in self.config.iteritems():
-         if email == account:
-            foundConfigs.append( email )
-         elif conf.get( 'alias' ) == account:
-            foundConfigs.append( email )
+   if args.assert_email:
+      if args.assert_email != emailAddr:
+         print( "Authorized account for %s did not match %s" %
+                ( emailAddr, args.assert_email ) )
+   else:
+      print_v( "Account email: %s" % service.get_email_addr() )
 
-      if len( foundConfigs ) > 1:
-         raise KeyError( 'Found multiple matches for %s' % account )
-      if len( foundConfigs ) == 0:
-         raise KeyError( 'No matches for %s' % account )
-      return foundConfigs[ 0 ]
+   return service
 
-   def accountFilters( self ):
-      return self.config[ self.account ]
+def auth_cmd():
+   get_auth_http()
 
-   def expandFilterRefs( self, refFilterStr ):
-      parts = re.split( r'\b(\w+)\b', refFilterStr )
-      keywords = [ 'AND', 'OR' ]
-      for i in range( len( parts ) ):
-         if re.match( '^\w+$',  parts[ i ] ) and parts[ i ] not in keywords:
-            parts[ i ] = self.filterString( parts[ i ] )
+def list_cmd():
+   service = get_service()
+   printer = Api.Printer( service, not args.no_color )
+   filters = service.get_filters()
+   if not filters:
+      print_v( 'No filters found.' )
+   else:
+      try:
+         for filter_ in filters:
+            if args.search_regexp is not None:
+               if not re.search( args.search_regexp, repr( filter_ ) ):
+                  continue
+            printer.print_filter( filter_ )
+            print( '' )
+      except re.error as e:
+         print( 'regex error: ' + str( e ) )
 
-      return ''.join( parts )
+def replace_cmd():
+   service = get_service()
+   printer = Api.Printer( service, not args.no_color )
+   filters = service.get_filters()
+   if not filters:
+      filters = []
 
-   def filterString( self, rootFilterName ):
-      filterObj = self.accountFilters()[ 'filters' ][ rootFilterName ]
-      assert( set( filterObj.keys() ).issubset( set( [ 'filter', 'extras' ] ) ) )
+   matchedFilters = []
+   replaceFilters = []
 
-      filterString = filterObj.get( 'filter', '' )
-      if filterString:
-         filterString = parensWrap( filterString )
+   for filter_ in filters:
+      field = filter_[ 'criteria' ].get( args.field, '' )
+      m = re.search( args.search_regexp, field )
+      if m:
+         matchedFilters.append( filter_ )
 
-      extrasString = ''
-      if 'extras' in filterObj:
-         extrasString = ' ' + self.expandFilterRefs( filterObj[ 'extras' ] )
+         newFilter = copy.deepcopy( filter_ )
+         newFilter[ 'criteria' ][ args.field ] = re.sub( args.search_regexp,
+                                                         args.sub_pattern, field )
+         replaceFilters.append( newFilter )
 
-      return parensWrap( filterString + extrasString )
+   if not replaceFilters:
+      print_v( "No changes will be made" )
+      return 0
 
-   def createEntries( self, filterAction ):
-      def addProperty( entry, name, val ):
-         prop = ET.SubElement( entry, 'apps:property' )
-         prop.set( 'name', name )
-         prop.set( 'value', val )
+   print( maybe_color( "Replacements to be done:", style='bold' ) )
+   for newFilter, oldFilter in zip( replaceFilters, matchedFilters ):
+      printer.print_filter( oldFilter, newFilter=newFilter )
+      print( "" )
 
-      permittedAttrs = set( [ 'filters', 'archive', 'markRead', 'label',
-                              'categorize', 'star', 'important' ] )
-      assert set( filterAction.keys() ).issubset( permittedAttrs ), \
-              "%s is not a subset of %s" % ( filterAction.keys(), permittedAttrs )
+   if check_with_user( "Make these changes?",
+                       requireLongConfirm=len( replaceFilters ) > 1 ):
+      for filter_ in replaceFilters:
+         id_ = filter_[ 'id' ]
+         service.create_filter( filter_ )
+         service.delete_filter( id_ )
 
-      filters = filterAction[ 'filters' ]
-      assert isinstance( filters, list ), "filters is a %s" % type( filters )
+def update_cmd():
+   service = get_service()
+   printer = Api.Printer( service, not args.no_color )
+   filters = service.get_filters()
+   if not filters:
+      filters = []
 
-      entries = []
-      for fs in filters:
-         entry = ET.Element( 'entry' )
-         category = ET.SubElement( entry, 'category' )
-         category.set( 'term', 'filter' )
+   oldFiltersById = {}
 
-         filterString = self.expandFilterRefs( fs )
-         addProperty( entry, 'hasTheWord', filterString )
+   updatedFilterQueryElems = {}
+   for filter_ in filters:
+      oldFiltersById[ filter_[ 'id' ] ] = filter_
+      filterStr = filter_[ 'criteria' ].get( 'query' )
+      if filterStr is not None:
+         filterElems = parse_filter_element( filterStr )
+         updatedFilterQueryElems[ filter_[ 'id' ] ] = filterElems
 
-         if 'archive' in filterAction:
-            addProperty( entry, 'shouldArchive',
-                         boolstrings[ filterAction[ 'archive' ] ] )
+   try:
+      update_all_meta_groups( updatedFilterQueryElems )
+   except TemplateError as e:
+      print( "Template error: " + str( e ) )
 
-         if 'markRead' in filterAction:
-            addProperty( entry, 'shouldMarkAsRead',
-                         boolstrings[ filterAction[ 'markRead' ] ] )
+   updatedFilters = {}
+   hasPrintedHeader = False
+   for id_, filterQElem in updatedFilterQueryElems.items():
+      oldFilter = oldFiltersById[ id_ ]
+      newQuery = filterQElem.full_filter_str()
+      if newQuery != oldFilter[ 'criteria' ][ 'query' ]:
+         if not hasPrintedHeader:
+            print( maybe_color( "Updated to be done:", style='bold' ) )
+            hasPrintedHeader = True
 
-         if 'label' in filterAction:
-            addProperty( entry, 'label', filterAction[ 'label' ] )
+         updatedFilter = copy.deepcopy( oldFiltersById[ id_ ] )
+         updatedFilter[ 'criteria' ][ 'query' ] = newQuery
+         updatedFilters[ id_ ] = updatedFilter
+         printer.print_filter( oldFilter, newFilter=updatedFilter )
+         print( "" )
 
-         if 'categorize' in filterAction:
-            addProperty( entry, 'smartLabelToApply',
-                         categories[ filterAction[ 'categorize' ] ] )
+   if not updatedFilters:
+      print_v( "No updates to be made" )
+      return 0
 
-         if 'star' in filterAction:
-            addProperty( entry, 'shouldStar', boolstrings[ filterAction[ 'star' ] ] )
-
-         if 'important' in filterAction:
-            addProperty( entry, markImportantKeys[ filterAction[ 'important' ] ],
-                         'true' )
-
-         addProperty( entry, 'sizeOperator', 's_sl' )
-         addProperty( entry, 'sizeUnit', 's_smb' )
-
-         entries.append( entry )
-
-      return entries
-
-   def toXml( self ):
-      root = ET.Element( 'feed' )
-      root.set( 'xmlns', 'http://www.w3.org/2005/Atom' )
-      root.set( 'xmlns:apps', 'http://schemas.google.com/apps/2006' )
-      author = ET.SubElement( root, 'author' )
-      ET.SubElement( author, 'name' ).text = self.accountFilters().get( 'author' )
-      for filterAction in self.accountFilters()[ 'actions' ]:
-         root.extend( self.createEntries( filterAction ) )
-
-      reparsed = minidom.parseString( ET.tostring( root ) )
-      return reparsed.toprettyxml( indent="  ", encoding='UTF-8' )
+   if check_with_user( "Make these changes?",
+                       requireLongConfirm=len( updatedFilters ) > 1 ):
+      for id_, filter_ in updatedFilters.items():
+         service.create_filter( filter_ )
+         service.delete_filter( id_ )
 
 def main():
-   if len( sys.argv ) < 2:
-      print "usage: gmail-filters accountname"
-      exit( 1 )
-   account = sys.argv[ 1 ]
-   try:
-      ch = ConfigHelper( CONFIG_FNAME, account )
-      print ch.toXml()
-   except IOError, e:
-      print str( e )
-      exit( 1 )
+   """Shows basic usage of the Gmail API.
+
+   Creates a Gmail API service object and outputs a list of filters
+   of the user's Gmail account.
+   """
+   # Global cmd options
+   cmdParserBase = Api.new_argparser_base( addHelp=False )
+   cmdParserBase.add_argument( '--assert-email', metavar='EMAIL_ADDR',
+                                help="Check that the authorized account matches "
+                                     "this email address, before taking any "
+                                     "action." )
+   cmdParserBase.add_argument( '--dry-run', action='store_true',
+                               help="Do not perform any actual updates. "
+                                    "Just echo what would happen." )
+   cmdParserBase.add_argument( '--verbose', '-v', action='store_true',
+                               help="Print verbose output" )
+   cmdParserBase.add_argument( '--no-color', action='store_true',
+                               help="Do not use ANSII colors in output" )
+   cmdParserBase.add_argument( '--assumeyes', '-y', action='store_true',
+                               help="Answer yes to all prompts." )
+
+   parser = argparse.ArgumentParser()
+   cmdParser = parser.add_subparsers( title='command', dest='command' )
+   cmdParser.required = True
+   # Auth
+   authParser = cmdParser.add_parser( 'authorize', aliases=[ 'auth' ],
+                                      parents=[ cmdParserBase ],
+                                      help="Just set up the authentication of this "
+                                           "tool with a Google account" )
+   authParser.set_defaults( func=auth_cmd )
+
+   # List
+   listParser = cmdParser.add_parser( 'list', aliases=[ 'ls' ],
+                                      parents=[ cmdParserBase ],
+                                      help="List Gmail filters" )
+   listParser.set_defaults( func=list_cmd )
+   listParser.add_argument( 'search_regexp', nargs='?',
+                            help="Limit listed filters to ones that match this "
+                                 "pattern" )
+
+   # Update
+   updateParser = cmdParser.add_parser( 'update', parents=[ cmdParserBase ],
+                                        help="Update help" )
+   updateParser.set_defaults( func=update_cmd )
+
+   # Replace parser
+   replaceParser = cmdParser.add_parser( 'replace', parents=[ cmdParserBase ],
+                                         help="Replace help" )
+   replaceParser.set_defaults( func=replace_cmd )
+   replaceParser.add_argument( 'search_regexp' )
+   replaceParser.add_argument( 'sub_pattern' )
+   replaceParser.add_argument( '--field', '-f', default='query', choices=CRITERIA,
+                               help='The field to run the replace on.' )
+
+   global args
+   args = parser.parse_args()
+
+   return args.func()
 
 if __name__ == '__main__':
-   main()
+   exit( main() )
