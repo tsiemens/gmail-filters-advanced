@@ -45,6 +45,9 @@ def get_credentials( flags ):
    store = Storage( credential_path )
    credentials = store.get()
    if not credentials or credentials.invalid:
+      if not os.path.exists( CLIENT_SECRET_FILE ):
+         print( "Ensure that you have downloaded a client secret and placed it at "
+                "%s" % CLIENT_SECRET_FILE )
       flow = client.flow_from_clientsecrets( CLIENT_SECRET_FILE, SCOPES )
       flow.user_agent = APPLICATION_NAME
       credentials = tools.run_flow( flow, store, flags )
