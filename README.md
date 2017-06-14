@@ -20,6 +20,8 @@ The `replace` command allows you do to do regex replacements on all filters.
 # Set up
 Install the contents of requirements.txt
 
+Download a client_secret.json file from the Google App Developer Console's API Manager, for an app with just the Gmail API enabled. Put this file at ~/.gmail_filters/client_secret.json. 
+
 # Development
 ```
 make initenv
