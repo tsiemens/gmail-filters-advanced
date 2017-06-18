@@ -1,33 +1,39 @@
 from __future__ import print_function
-import copy
+import re
 import sys
 
-from GmailFilters import FilterElement, ElementParser, ParseError
+from GmailFilters import FilterElement, ElementParser, ParseError, \
+                         parse_filter_element
 
 META_LABEL = 'M3TA'
+META_PRIMARY_LABEL = 'M3TAP'
+
+meta_regexp = re.compile( '^M3TAP?$' )
 
 class TemplateError( Exception ):
    pass
 
-def get_meta_group_key( elem ):
+def get_meta_group_key( elem, primaryOnly=False ):
    '''If elem is of the format of (M3TA x y z) or "META x y z",
    returns a sorted tuple of ('x', 'y', 'z').
    '''
-   tags = []
    foundMeta = False
    if elem.delims == '()' and elem.has_sub_elems():
-      for se in elem.subElems:
-         if se.filterStr == META_LABEL:
-            foundMeta = True
-         else:
-            tags.append( se.full_filter_str().strip() )
+      tags = [ se.full_filter_str().strip() for se in elem.subElems ]
    elif elem.delims == '""':
       tags = elem.filterStr.split()
-      foundMeta = META_LABEL in tags
-      tags.remove( META_LABEL )
+   else:
+      return None
+
+   if primaryOnly:
+      foundMeta = META_PRIMARY_LABEL in tags
+   else:
+      foundMeta = any( filter( meta_regexp.match, tags ) )
 
    if not foundMeta:
       return None
+
+   tags = [ t for t in tags if not meta_regexp.match( t ) ]
    if not tags:
       raise TemplateError( 'Template meta group has no labels: %s' %
                            elem.full_filter_str() )
@@ -35,14 +41,14 @@ def get_meta_group_key( elem ):
    tags.sort()
    return tuple( tags )
 
-def get_template_group_key( elem ):
+def get_template_group_key( elem, primaryOnly=False ):
    if not elem.has_sub_elems() or elem.delims != '{}':
       return None
 
    metaKeyCnt = 0
    metaKey = None
    for subElem in elem.subElems:
-      k = get_meta_group_key( subElem )
+      k = get_meta_group_key( subElem, primaryOnly=primaryOnly )
       if k is not None:
          if metaKey is None:
             metaKey = k
@@ -52,8 +58,8 @@ def get_template_group_key( elem ):
 
    return metaKey
 
-def is_template_or_group( elem ):
-   return get_template_group_key( elem ) is not None
+def is_template_or_group( elem, primaryOnly=False ):
+   return get_template_group_key( elem, primaryOnly=primaryOnly ) is not None
 
 def find_primary_template_group( filterElem ):
    orGroup = None
@@ -70,7 +76,7 @@ def find_primary_template_group( filterElem ):
          nextElem = nextElem.subElems[ 0 ]
 
    assert orGroup
-   if is_template_or_group( orGroup ):
+   if is_template_or_group( orGroup, primaryOnly=True ):
       return orGroup
    else:
       return None
@@ -87,17 +93,23 @@ def find_all_meta_group_keys( filterElem ):
    return set.union( *( find_all_meta_group_keys( se )
                      for se in filterElem.subElems ) )
 
+def normalized_primary_elem( primaryElem ):
+   pStr = primaryElem.full_filter_str()
+   pStr = pStr.replace( META_PRIMARY_LABEL, META_LABEL )
+   elem = parse_filter_element( pStr ).subElems[ 0 ]
+   return elem
+
 def sub_meta_groups( filterElem, primaryElem ):
    if not filterElem.has_sub_elems():
       return
 
-   pMetaKey = get_template_group_key( primaryElem )
+   pMetaKey = get_template_group_key( primaryElem, primaryOnly=True )
    assert pMetaKey
 
    for i in range( len( filterElem.subElems ) ):
       k = get_template_group_key( filterElem.subElems[ i ] )
       if pMetaKey == k:
-         pCopy = copy.deepcopy( primaryElem )
+         pCopy = normalized_primary_elem( primaryElem )
          pCopy.preWs = filterElem.subElems[ i ].preWs
          pCopy.postWs = filterElem.subElems[ i ].postWs
          filterElem.subElems[ i ] = pCopy
@@ -112,7 +124,7 @@ def update_all_meta_groups( filterElemById ):
       primaryGroup = find_primary_template_group( filterElem )
       if primaryGroup is None:
          continue
-      key = get_template_group_key( primaryGroup )
+      key = get_template_group_key( primaryGroup, primaryOnly=True )
       assert key is not None
 
       if key in primaryKeyToId:

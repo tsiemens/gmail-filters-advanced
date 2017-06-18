@@ -50,16 +50,18 @@ class ParsingTest( ParserTestBase ):
                             find_primary_template_group, filterGroup )
 
       check( '{}', None )
-      check( '{(M3TA bla)}', '{(M3TA bla)}' )
-      check( '{xx (M3TA bla)}', '{xx (M3TA bla)}' )
-      check( '{(M3TA bla) yy}', '{(M3TA bla) yy}' )
-      check( '({(M3TA bla) yy})', '{(M3TA bla) yy}' )
-      checkRaises( '{(M3TA bla) yy (M3TA foo)}' )
+      check( '{(M3TA bla)}', None )
+      check( '{(M3TAP bla)}', '{(M3TAP bla)}' )
+      check( '{xx (M3TAP bla)}', '{xx (M3TAP bla)}' )
+      check( '{(M3TAP bla) yy}', '{(M3TAP bla) yy}' )
+      check( '({(M3TAP bla) yy})', '{(M3TAP bla) yy}' )
+      checkRaises( '{(M3TAP bla) yy (M3TAP foo)}' )
 
    @pm
    def testReplace( self ):
-      primary = '{(M3TA foo) (thing) thing2}'
+      primary = '{(M3TAP foo) (thing) thing2}'
       primaryGrp = find_primary_template_group( prs( primary ) )
+      primary = primary.replace( 'M3TAP', 'M3TA' )
 
       def check( filterStr, newFilterStr ):
          filterGroup = prs( filterStr )
@@ -82,33 +84,46 @@ class ParsingTest( ParserTestBase ):
       check( '{(M3TA foo) x}', [ ( 'foo', ) ] )
       check( '{(M3TA foo) {(M3TA bar) x}}', [ ( 'foo', ), ( 'bar', ) ] )
       check( '{(M3TA foo) x} b {(M3TA bar) y}', [ ( 'foo', ), ( 'bar', ) ] )
+      check( '{(M3TAP foo) x} b {(M3TA bar) y}', [ ( 'foo', ), ( 'bar', ) ] )
 
    @pm
    def testUpdateAll( self ):
       filters = {
-            '1': prs( '{(M3TA foo) new}' ),
+            '1': prs( '{(M3TAP foo) new}' ),
             '2': prs( 'bla {(M3TA foo) old} x' )
          }
 
       update_all_meta_groups( filters )
       expected = {
-            '1': prs( '{(M3TA foo) new}' ),
+            '1': prs( '{(M3TAP foo) new}' ),
             '2': prs( 'bla {(M3TA foo) new} x' )
+         }
+      self.assertDictEqual( filters, expected )
+
+      # Other with root key
+      filters = {
+            '1': prs( '{(M3TAP foo) new}' ),
+            '2': prs( '{(M3TA foo) old}' )
+         }
+      update_all_meta_groups( filters )
+      expected = {
+            '1': prs( '{(M3TAP foo) new}' ),
+            '2': prs( '{(M3TA foo) new}' )
          }
       self.assertDictEqual( filters, expected )
 
       # updates within primaries
       filters = {
-            '1': prs( '{(M3TA bar) newbarthing}' ),
-            '2': prs( '{(M3TA foo) newfoothing {(M3TA bar) oldbarthing}}' ),
+            '1': prs( '{(M3TAP bar) newbarthing}' ),
+            '2': prs( '{(M3TAP foo) newfoothing {(M3TA bar) oldbarthing}}' ),
             '3': prs( 'xx {(M3TA foo) oldfoothig {(M3TA bar) olderbarthing}}' ),
          }
 
       self.maxDiff = None
       update_all_meta_groups( filters )
       expected = {
-            '1': prs( '{(M3TA bar) newbarthing}' ),
-            '2': prs( '{(M3TA foo) newfoothing {(M3TA bar) newbarthing}}' ),
+            '1': prs( '{(M3TAP bar) newbarthing}' ),
+            '2': prs( '{(M3TAP foo) newfoothing {(M3TA bar) newbarthing}}' ),
             '3': prs( 'xx {(M3TA foo) newfoothing {(M3TA bar) newbarthing}}' ),
          }
       self.assertDictEqual( filters, expected )
@@ -117,8 +132,8 @@ class ParsingTest( ParserTestBase ):
    def testUpdateAllErrors( self ):
       # Duplicate primaries
       filters = {
-            '1': prs( '{(M3TA foo) new}' ),
-            '2': prs( '{(M3TA foo) old}' )
+            '1': prs( '{(M3TAP foo) new}' ),
+            '2': prs( '{(M3TAP foo) old}' )
          }
       self.assertRaises( TemplateError, update_all_meta_groups, filters )
 
@@ -128,12 +143,17 @@ class ParsingTest( ParserTestBase ):
          }
       self.assertRaises( TemplateError, update_all_meta_groups, filters )
 
+      filters = {
+            '1': prs( '{(M3TAP) new}' ),
+         }
+      self.assertRaises( TemplateError, update_all_meta_groups, filters )
+
       # Missing key
       filters = {
-            '1': prs( '{(M3TA foo) new}' ),
+            '1': prs( '{(M3TAP foo) new}' ),
             '2': prs( 'x {(M3TA bar) old} {(M3TA baz) x}' )
          }
       self.assertRaises( TemplateError, update_all_meta_groups, filters )
 
 if __name__ == '__main__':
-   unittest.main()
+   unittest.main( failfast=True )
